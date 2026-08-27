@@ -8,8 +8,20 @@ Streamlit Community Cloud).
 """
 
 import json
+import os
 
 import streamlit as st
+
+# Comodità solo per lo sviluppo in locale: se esiste un file .env lo carica
+# nelle variabili d'ambiente. Su Coolify/Render le variabili le imposti nella
+# dashboard del servizio, quindi python-dotenv semplicemente non trova nulla
+# da fare e non serve preoccuparsene in produzione.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 import db
 import dspy_pipeline as pipeline
@@ -17,7 +29,7 @@ import dspy_pipeline as pipeline
 st.set_page_config(page_title="DSPy Prompt Studio", page_icon="🧩", layout="wide")
 
 # Provider/modelli disponibili in UI. Per aggiungerne uno nuovo:
-# 1) aggiungi la riga qui sotto, 2) aggiungi il secret <PROVIDER>_API_KEY corrispondente.
+# 1) aggiungi la riga qui sotto, 2) aggiungi la variabile d'ambiente <PROVIDER>_API_KEY corrispondente.
 PROVIDERS = {
     "anthropic": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
     "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4.1"],
@@ -26,10 +38,11 @@ PROVIDERS = {
 
 def get_api_key(provider: str) -> str:
     key_name = f"{provider.upper()}_API_KEY"
-    if key_name not in st.secrets:
-        st.error(f"Manca il secret `{key_name}`. Aggiungilo in secrets.toml (vedi ISTRUZIONI.md).")
+    value = os.environ.get(key_name)
+    if not value:
+        st.error(f"Manca la variabile d'ambiente `{key_name}`. Impostala nel servizio (vedi ISTRUZIONI.md).")
         st.stop()
-    return st.secrets[key_name]
+    return value
 
 
 # ---------------------------------------------------------------------------
