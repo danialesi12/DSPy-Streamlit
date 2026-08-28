@@ -81,6 +81,15 @@ def get_client(client_id: str):
     return df.iloc[0] if not df.empty else None
 
 
+def delete_client(client_id: str):
+    # Le foreign key di llm_configs/kb_documents/examples/runs sono definite
+    # con "on delete cascade" (vedi schema.sql), quindi cancellando il cliente
+    # spariscono automaticamente anche tutta la sua knowledge base, gli esempi,
+    # le configurazioni LLM e lo storico delle run -- nessuna query aggiuntiva
+    # necessaria qui.
+    _execute("delete from promptstudio.clients where id = :id", {"id": client_id})
+
+
 # ---------------------------------------------------------------------------
 # Knowledge base documents
 # ---------------------------------------------------------------------------
