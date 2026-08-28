@@ -139,6 +139,21 @@ with tab_client:
         else:
             st.warning("Inserisci un id modello valido.")
 
+    st.markdown("---")
+    with st.expander("⚠️ Zona pericolosa"):
+        st.write(
+            f"Elimina definitivamente il cliente **{selected_name}** insieme a tutta la sua "
+            "knowledge base, gli esempi e lo storico delle run. L'operazione non è reversibile."
+        )
+        confirm_delete = st.checkbox(
+            f"Confermo di voler eliminare '{selected_name}' e tutti i suoi dati",
+            key="confirm_delete_client",
+        )
+        if st.button("🗑️ Elimina cliente", disabled=not confirm_delete):
+            db.delete_client(client_id)
+            st.toast(f"Cliente '{selected_name}' eliminato con successo.", icon="🗑️")
+            st.rerun()
+
 # ---------------------------------------------------------------------------
 # Tab: knowledge base
 # ---------------------------------------------------------------------------
