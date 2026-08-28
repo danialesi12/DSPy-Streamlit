@@ -28,11 +28,23 @@ import dspy_pipeline as pipeline
 
 st.set_page_config(page_title="DSPy Prompt Studio", page_icon="🧩", layout="wide")
 
-# Provider/modelli disponibili in UI. Per aggiungerne uno nuovo:
-# 1) aggiungi la riga qui sotto, 2) aggiungi la variabile d'ambiente <PROVIDER>_API_KEY corrispondente.
+# Modelli "suggeriti" in UI (scorciatoia per i più usati), tutti raggiunti
+# tramite OpenRouter con un'unica chiave (OPENROUTER_API_KEY). Il formato è
+# "openrouter/<provider>/<modello>", dove <provider>/<modello> è esattamente
+# l'id modello che OpenRouter usa nel suo catalogo (vedi openrouter.ai/models).
+# Non è più l'unico modo di scegliere un modello: nella tab "Descrizione & LLM"
+# c'è anche un campo per digitare qualsiasi id OpenRouter direttamente dalla
+# UI, senza toccare questo file. Questa lista resta utile solo come elenco di
+# scorciatoie rapide per i modelli che usi più spesso.
 PROVIDERS = {
-    "anthropic": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
-    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4.1"],
+    "openrouter": [
+        "anthropic/claude-sonnet-4-5",
+        "anthropic/claude-opus-4-1",
+        "anthropic/claude-haiku-4-5",
+        "openai/gpt-4o",
+        "openai/gpt-4.1",
+        "google/gemini-2.5-pro",
+    ],
 }
 
 
@@ -98,16 +110,34 @@ with tab_client:
     else:
         st.caption("Nessuna configurazione ancora. Aggiungine una qui sotto.")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        provider = st.selectbox("Provider", list(PROVIDERS.keys()))
-    with col2:
-        model = st.selectbox("Modello", PROVIDERS[provider])
+    # Tutto passa da OpenRouter con un'unica chiave, quindi il "provider" è
+    # fisso. Il modello invece si può scegliere dalla lista di suggerimenti
+    # oppure digitare direttamente -- così per provare un modello nuovo del
+    # catalogo OpenRouter non serve più modificare app.py e rifare il deploy.
+    provider = "openrouter"
+    CUSTOM_OPTION = "✏️ Altro (inserisci id modello manualmente)"
+    model_choice = st.selectbox("Modello", PROVIDERS[provider] + [CUSTOM_OPTION])
+    if model_choice == CUSTOM_OPTION:
+        model = st.text_input(
+            "Id modello OpenRouter",
+            placeholder="es. mistralai/mistral-large-2411",
+            help=(
+                "Copia l'id esatto del modello da openrouter.ai/models (formato "
+                "<provider>/<modello>). Con la stessa OPENROUTER_API_KEY funziona "
+                "subito, senza bisogno di modificare il codice o rifare il deploy."
+            ),
+        ).strip()
+    else:
+        model = model_choice
+
     is_default = st.checkbox("Imposta come default per questo cliente", value=True)
     if st.button("Aggiungi configurazione LLM"):
-        db.add_llm_config(client_id, provider, model, is_default)
-        st.success("Configurazione salvata.")
-        st.rerun()
+        if model:
+            db.add_llm_config(client_id, provider, model, is_default)
+            st.success("Configurazione salvata.")
+            st.rerun()
+        else:
+            st.warning("Inserisci un id modello valido.")
 
 # ---------------------------------------------------------------------------
 # Tab: knowledge base
