@@ -72,7 +72,7 @@ with st.sidebar.expander("➕ Nuovo cliente"):
     if st.button("Crea cliente"):
         if new_name.strip():
             db.create_client(new_name.strip(), new_desc.strip())
-            st.success(f"Cliente '{new_name}' creato. Selezionalo dal menu qui sopra.")
+            st.toast(f"Cliente '{new_name}' creato con successo.", icon="✅")
             st.rerun()
         else:
             st.warning("Inserisci un nome.")
@@ -100,7 +100,7 @@ with tab_client:
     )
     if st.button("Salva descrizione"):
         db.update_client_description(client_id, desc)
-        st.success("Descrizione aggiornata.")
+        st.toast("Descrizione aggiornata con successo.", icon="✅")
         st.rerun()
 
     st.subheader("Configurazione LLM")
@@ -134,7 +134,7 @@ with tab_client:
     if st.button("Aggiungi configurazione LLM"):
         if model:
             db.add_llm_config(client_id, provider, model, is_default)
-            st.success("Configurazione salvata.")
+            st.toast("Configurazione LLM salvata con successo.", icon="✅")
             st.rerun()
         else:
             st.warning("Inserisci un id modello valido.")
@@ -151,6 +151,7 @@ with tab_kb:
                 st.write(doc["content"])
                 if st.button("Elimina", key=f"del_kb_{doc['id']}"):
                     db.delete_kb_document(doc["id"])
+                    st.toast("Documento eliminato con successo.", icon="🗑️")
                     st.rerun()
     else:
         st.caption("Nessun documento ancora.")
@@ -164,7 +165,7 @@ with tab_kb:
     if st.button("Aggiungi alla knowledge base"):
         if doc_content.strip():
             db.add_kb_document(client_id, doc_title.strip(), doc_content.strip())
-            st.success("Documento aggiunto.")
+            st.toast("Documento aggiunto con successo.", icon="✅")
             st.rerun()
         else:
             st.warning("Il contenuto non può essere vuoto.")
@@ -187,6 +188,7 @@ with tab_examples:
         )
         if del_id != "—" and st.button("Elimina esempio selezionato"):
             db.delete_example(del_id)
+            st.toast("Esempio eliminato con successo.", icon="🗑️")
             st.rerun()
     else:
         st.caption("Nessun esempio ancora — per i clienti nuovi va bene, userai la modalità 'draft'.")
@@ -203,7 +205,7 @@ with tab_examples:
     if st.button("Aggiungi esempio"):
         if q.strip() and a.strip():
             db.add_example(client_id, q.strip(), a.strip(), ctx.strip() or None, split)
-            st.success("Esempio aggiunto.")
+            st.toast("Esempio aggiunto con successo.", icon="✅")
             st.rerun()
         else:
             st.warning("Domanda e risposta sono obbligatorie.")
