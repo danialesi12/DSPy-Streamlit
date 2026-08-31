@@ -281,7 +281,14 @@ with tab_run:
                             raise ValueError("Nessun esempio di training disponibile per l'ottimizzazione.")
                         trainset = [
                             {
-                                "context": row["context"] or business_context,
+                                # row["context"] e' NaN (float) quando la colonna e' NULL nel
+                                # DB -- "NaN or business_context" NON fa fallback perche' NaN
+                                # e' truthy in Python (a differenza di None/""), quindi va
+                                # controllato esplicitamente: solo una stringa non vuota conta
+                                # come "contesto specifico impostato".
+                                "context": row["context"]
+                                if isinstance(row["context"], str) and row["context"].strip()
+                                else business_context,
                                 "question": row["question"],
                                 "expected_answer": row["expected_answer"],
                             }
