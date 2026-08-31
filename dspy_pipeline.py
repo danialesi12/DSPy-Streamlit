@@ -59,13 +59,17 @@ def run_draft(lm: dspy.LM, business_context: str, sample_question: str | None = 
     zero-shot con la sola descrizione/KB come contesto. Nessuna vera
     ottimizzazione: è un punto di partenza ragionevole da rifinire a mano
     o, in futuro, con esempi reali (modalità 'optimize')."""
-    dspy.configure(lm=lm)
     agent = SupportAgent()
 
-    sample_answer = None
-    if sample_question:
-        pred = agent(business_context=business_context, question=sample_question)
-        sample_answer = pred.answer
+    # dspy.context (a differenza di dspy.configure) puo' essere usato da
+    # qualsiasi thread -- necessario perche' Streamlit esegue ogni rerun
+    # (ogni click su un bottone) in un thread nuovo, e dspy.configure()
+    # accetta modifiche solo dal thread che lo ha chiamato la prima volta.
+    with dspy.context(lm=lm):
+        sample_answer = None
+        if sample_question:
+            pred = agent(business_context=business_context, question=sample_question)
+            sample_answer = pred.answer
 
     return {
         "agent": agent,
@@ -95,8 +99,6 @@ def run_optimize(
     training set per compilare un modulo migliorato con BootstrapFewShot.
     Ogni elemento di trainset è un dict con chiavi: context, question, expected_answer.
     """
-    dspy.configure(lm=lm)
-
     examples = [
         dspy.Example(
             business_context=ex["context"],
@@ -110,7 +112,10 @@ def run_optimize(
         metric=metric or answer_match_metric,
         max_bootstrapped_demos=max_bootstrapped_demos,
     )
-    compiled_agent = teleprompter.compile(SupportAgent(), trainset=examples)
+    # vedi il commento in run_draft: dspy.context() invece di dspy.configure()
+    # perché BootstrapFewShot può valutare gli esempi anche da thread interni.
+    with dspy.context(lm=lm):
+        compiled_agent = teleprompter.compile(SupportAgent(), trainset=examples)
 
     return {
         "agent": compiled_agent,
@@ -151,6 +156,6 @@ def load_program_from_dict(state: dict) -> SupportAgent:
 
 
 def ask(agent: SupportAgent, lm: dspy.LM, business_context: str, question: str) -> str:
-    dspy.configure(lm=lm)
-    pred = agent(business_context=business_context, question=question)
+    with dspy.context(lm=lm):
+        pred = agent(business_context=business_context, question=question)
     return pred.answer
