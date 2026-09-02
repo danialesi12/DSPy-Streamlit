@@ -165,12 +165,12 @@ def add_llm_config(client_id: str, provider: str, model: str, is_default: bool =
 # Runs
 # ---------------------------------------------------------------------------
 
-def create_run(client_id: str, mode: str, llm_config_id: str) -> str:
+def create_run(client_id: str, mode: str, llm_config_id: str, retrieval: str = "full_context") -> str:
     new_id = str(uuid.uuid4())
     _execute(
-        "insert into promptstudio.runs (id, client_id, mode, llm_config_id, status) "
-        "values (:id, :cid, :mode, :llm, 'running')",
-        {"id": new_id, "cid": client_id, "mode": mode, "llm": llm_config_id},
+        "insert into promptstudio.runs (id, client_id, mode, retrieval, llm_config_id, status) "
+        "values (:id, :cid, :mode, :retrieval, :llm, 'running')",
+        {"id": new_id, "cid": client_id, "mode": mode, "retrieval": retrieval, "llm": llm_config_id},
     )
     return new_id
 
@@ -205,7 +205,7 @@ def finish_run(
 
 def list_runs(client_id: str) -> pd.DataFrame:
     return _query(
-        "select id, client_id, mode, llm_config_id, status, metrics, "
+        "select id, client_id, mode, retrieval, llm_config_id, status, metrics, "
         "compiled_prompt_preview, error, created_at, finished_at "
         "from promptstudio.runs where client_id = :cid order by created_at desc",
         {"cid": client_id},
