@@ -260,6 +260,19 @@ with tab_run:
             index=["draft", "optimize"].index(suggested_mode),
             horizontal=True,
         )
+        retrieval = st.radio(
+            "Retrieval",
+            ["full_context", "tools"],
+            format_func=lambda r: "Contesto pieno (KB intera nel prompt)"
+            if r == "full_context"
+            else "Tool su KB (get_index_pages / get_page_by_id, come un agente RAG)",
+            horizontal=True,
+            help=(
+                "'Contesto pieno' è il comportamento storico: semplice, ma con KB grandi "
+                "pesa su token e latenza. 'Tool su KB' fa recuperare al modello solo le "
+                "pagine pertinenti tramite ReAct, più vicino a un agente in produzione."
+            ),
+        )
 
         kb_docs = db.list_kb_documents(client_id)
         business_context = pipeline.build_context(
@@ -271,10 +284,24 @@ with tab_run:
             api_key = get_api_key(llm_config_row["provider"])
             lm = pipeline.build_lm(llm_config_row["provider"], llm_config_row["model"], api_key)
 
-            run_id = db.create_run(client_id, mode, llm_config_row["id"])
+            run_id = db.create_run(client_id, mode, llm_config_row["id"], retrieval=retrieval)
             try:
                 with st.spinner(f"Eseguo run in modalità '{mode}'... può richiedere qualche minuto."):
-                    if mode == "draft":
+                    if retrieval == "tools":
+                        if mode == "draft":
+                            result = pipeline.run_draft_with_tools(lm, client_id)
+                        else:
+                            if train_examples.empty:
+                                raise ValueError("Nessun esempio di training disponibile per l'ottimizzazione.")
+                            trainset = [
+                                {
+                                    "question": row["question"],
+                                    "expected_answer": row["expected_answer"],
+                                }
+                                for _, row in train_examples.iterrows()
+                            ]
+                            result = pipeline.run_optimize_with_tools(lm, client_id, trainset)
+                    elif mode == "draft":
                         result = pipeline.run_draft(lm, business_context)
                     else:
                         if train_examples.empty:
@@ -317,7 +344,7 @@ with tab_history:
     if runs_df.empty:
         st.info("Nessuna run ancora eseguita per questo cliente.")
     else:
-        st.dataframe(runs_df[["created_at", "mode", "status"]], use_container_width=True)
+        st.dataframe(runs_df[["created_at", "mode", "retrieval", "status"]], use_container_width=True)
         run_ids = runs_df["id"].tolist()
         selected_run_id = st.selectbox(
             "Visualizza dettaglio run",
@@ -360,14 +387,24 @@ with tab_test:
         if st.button("Chiedi") and test_question.strip():
             api_key = get_api_key(llm_config_row["provider"])
             lm = pipeline.build_lm(llm_config_row["provider"], llm_config_row["model"], api_key)
-            agent = pipeline.load_program_from_dict(run_row["compiled_program"])
-            kb_docs = db.list_kb_documents(client_id)
-            business_context = pipeline.build_context(
-                client_row["business_description"] or "",
-                kb_docs.to_dict("records") if not kb_docs.empty else [],
-            )
             with st.spinner("Genero risposta..."):
-                answer = pipeline.ask(agent, lm, business_context, test_question.strip())
+                if run_row["retrieval"] == "tools":
+                    # I tool non sono nello stato salvato (dump_state salva solo
+                    # istruzioni + demo): vanno ricostruiti per questo client_id
+                    # prima di ricaricare lo stato, altrimenti l'agente non avrebbe
+                    # nulla con cui rispondere.
+                    agent = pipeline.load_program_from_dict_with_tools(
+                        run_row["compiled_program"], client_id
+                    )
+                    answer = pipeline.ask_with_tools(agent, lm, test_question.strip())
+                else:
+                    agent = pipeline.load_program_from_dict(run_row["compiled_program"])
+                    kb_docs = db.list_kb_documents(client_id)
+                    business_context = pipeline.build_context(
+                        client_row["business_description"] or "",
+                        kb_docs.to_dict("records") if not kb_docs.empty else [],
+                    )
+                    answer = pipeline.ask(agent, lm, business_context, test_question.strip())
             st.write(answer)
 
         st.markdown("---")
