@@ -6,12 +6,20 @@ Convenzioni:
 - `provider` segue la sintassi LiteLLM usata da dspy.LM: "anthropic", "openai", ecc.
 - Il "programma compilato" viene serializzato con agent.dump_state() (dict JSON-friendly)
   e ricaricato con agent.load_state(state) — non serve toccare il filesystem.
+- Esistono due strategie di retrieval, scelte a run-time (vedi app.py):
+  "full_context" (SupportAgent, storica: tutta la KB concatenata in una stringa)
+  e "tools" (SupportAgentWithTools: un dspy.ReAct che recupera solo le pagine
+  pertinenti tramite get_index_pages/get_page_by_id). I tool sono chiusi su
+  un client_id specifico (vedi build_kb_tools) perché l'app è multi-tenant:
+  non sono funzioni globali come in un agente a singolo cliente.
 """
 
 from __future__ import annotations
 
 import dspy
 from dspy.teleprompt import BootstrapFewShot
+
+import db
 
 
 class AnswerCustomerQuestion(dspy.Signature):
@@ -33,6 +41,69 @@ class SupportAgent(dspy.Module):
 
     def forward(self, business_context: str, question: str):
         return self.respond(business_context=business_context, question=question)
+
+
+class AnswerCustomerQuestionWithTools(dspy.Signature):
+    """Rispondi alla domanda del cliente usando i tool per recuperare le
+    informazioni pertinenti dalla knowledge base. Non rispondere mai basandoti
+    solo sui titoli restituiti da get_index_pages: per qualsiasi domanda
+    specifica devi prima chiamare get_page_by_id sulla pagina più pertinente.
+    Se dopo aver consultato le pagine rilevanti l'informazione non c'è,
+    dillo chiaramente invece di inventare una risposta."""
+
+    question: str = dspy.InputField(desc="Domanda posta dall'utente finale")
+    answer: str = dspy.OutputField(desc="Risposta basata solo sul contenuto recuperato dai tool")
+
+
+class SupportAgentWithTools(dspy.Module):
+    """Variante di SupportAgent che recupera il contesto con dei tool
+    (dspy.ReAct) invece di ricevere l'intera KB concatenata in un campo.
+    I tool vanno costruiti per il cliente corrente con build_kb_tools()
+    e passati qui: il modulo in sé non sa nulla di quale cliente sia."""
+
+    def __init__(self, tools: list[dspy.Tool], max_iters: int = 4):
+        super().__init__()
+        self.respond = dspy.ReAct(AnswerCustomerQuestionWithTools, tools=tools, max_iters=max_iters)
+
+    def forward(self, question: str):
+        return self.respond(question=question)
+
+
+def build_kb_tools(client_id: str) -> list[dspy.Tool]:
+    """Costruisce i tool di retrieval per UN cliente specifico. Leggono la KB
+    da Postgres a ogni chiamata (nessuno stato tenuto in memoria tra una
+    chiamata e l'altra): sicuro anche perché Streamlit esegue ogni rerun in
+    un thread nuovo (vedi il commento su dspy.context in run_draft)."""
+
+    def get_index_pages() -> str:
+        """Elenco di id e titolo di ogni pagina della knowledge base di
+        questo cliente. Usalo per capire quale pagina è pertinente prima
+        di chiamare get_page_by_id: non contiene il testo completo."""
+        docs = db.list_kb_documents(client_id)
+        if docs.empty:
+            return "Nessun documento in knowledge base."
+        return "\n".join(
+            f"- id={row.id} — {row.title or '(senza titolo)'}" for row in docs.itertuples()
+        )
+
+    def get_page_by_id(page_id: str) -> str:
+        """Contenuto completo di una pagina della knowledge base. page_id deve
+        essere copiato ESATTAMENTE da get_index_pages: non inventarlo, non
+        abbreviarlo, non dedurlo per somiglianza."""
+        docs = db.list_kb_documents(client_id)
+        match = docs[docs["id"].astype(str) == str(page_id)]
+        if match.empty:
+            return "Id non trovato: richiama get_index_pages per la lista aggiornata."
+        return match.iloc[0]["content"]
+
+    return [
+        dspy.Tool(get_index_pages, name="get_index_pages"),
+        dspy.Tool(
+            get_page_by_id,
+            name="get_page_by_id",
+            arg_desc={"page_id": "Id esatto, copiato letteralmente da get_index_pages"},
+        ),
+    ]
 
 
 def build_lm(provider: str, model: str, api_key: str, **kwargs) -> dspy.LM:
@@ -69,6 +140,25 @@ def run_draft(lm: dspy.LM, business_context: str, sample_question: str | None = 
         sample_answer = None
         if sample_question:
             pred = agent(business_context=business_context, question=sample_question)
+            sample_answer = pred.answer
+
+    return {
+        "agent": agent,
+        "preview": _extract_prompt_preview(agent),
+        "sample_answer": sample_answer,
+    }
+
+
+def run_draft_with_tools(lm: dspy.LM, client_id: str, sample_question: str | None = None) -> dict:
+    """Equivalente di run_draft ma con retrieval a tool invece che contesto
+    concatenato: niente business_context da costruire, i tool leggono la KB
+    del cliente al bisogno."""
+    agent = SupportAgentWithTools(build_kb_tools(client_id))
+
+    with dspy.context(lm=lm):
+        sample_answer = None
+        if sample_question:
+            pred = agent(question=sample_question)
             sample_answer = pred.answer
 
     return {
@@ -123,6 +213,37 @@ def run_optimize(
     }
 
 
+def run_optimize_with_tools(
+    lm: dspy.LM,
+    client_id: str,
+    trainset: list[dict],
+    metric=None,
+) -> dict:
+    """Equivalente di run_optimize per la modalità a tool. Ogni elemento di
+    trainset è un dict con chiavi: question, expected_answer. Il campo
+    "context" per-esempio (usato in modalità full_context per fare override
+    del contesto) qui non si applica: il contesto lo recupera l'agente stesso
+    tramite i tool, sempre dal DB corrente, non da un override statico."""
+    examples = [
+        dspy.Example(
+            question=ex["question"],
+            answer=ex["expected_answer"],
+        ).with_inputs("question")
+        for ex in trainset
+    ]
+
+    teleprompter = BootstrapFewShot(metric=metric or answer_match_metric)
+    with dspy.context(lm=lm):
+        compiled_agent = teleprompter.compile(
+            SupportAgentWithTools(build_kb_tools(client_id)), trainset=examples
+        )
+
+    return {
+        "agent": compiled_agent,
+        "preview": _extract_prompt_preview(compiled_agent),
+    }
+
+
 def _extract_prompt_preview(agent: dspy.Module) -> str:
     """Estrae una versione testuale leggibile delle istruzioni + demo
     compilati, utile per la revisione umana senza dover ricaricare DSPy."""
@@ -155,7 +276,25 @@ def load_program_from_dict(state: dict) -> SupportAgent:
     return agent
 
 
+def load_program_from_dict_with_tools(state: dict, client_id: str) -> SupportAgentWithTools:
+    """Attenzione: dump_state()/load_state() serializzano SOLO istruzioni e
+    demo del predictor, non i tool (sono funzioni Python, non JSON-friendly).
+    Per questo qui i tool vanno ricostruiti da zero con build_kb_tools(),
+    per lo stesso client_id usato durante l'ottimizzazione, PRIMA di
+    chiamare load_state — altrimenti l'agente ricaricato non avrebbe
+    nessun tool con cui rispondere."""
+    agent = SupportAgentWithTools(build_kb_tools(client_id))
+    agent.load_state(state)
+    return agent
+
+
 def ask(agent: SupportAgent, lm: dspy.LM, business_context: str, question: str) -> str:
     with dspy.context(lm=lm):
         pred = agent(business_context=business_context, question=question)
+    return pred.answer
+
+
+def ask_with_tools(agent: SupportAgentWithTools, lm: dspy.LM, question: str) -> str:
+    with dspy.context(lm=lm):
+        pred = agent(question=question)
     return pred.answer
