@@ -247,6 +247,9 @@ with tab_run:
         train_examples = (
             examples_df[examples_df["split"] == "train"] if not examples_df.empty else examples_df
         )
+        val_examples = (
+            examples_df[examples_df["split"] == "val"] if not examples_df.empty else examples_df
+        )
 
         suggested_mode = "optimize" if len(train_examples) >= 3 else "draft"
         st.write(
@@ -274,6 +277,67 @@ with tab_run:
             ),
         )
 
+        # Optimizer, rilevante solo per mode="optimize": BootstrapFewShot
+        # (storico, sceglie solo demo few-shot) vs GEPA (riscrive anche le
+        # istruzioni tramite un LLM di reflection che legge il feedback
+        # della metrica — vedi dspy_pipeline.gepa_feedback_metric).
+        optimizer_choice = "bootstrap"
+        reflection_llm_row = None
+        gepa_budget = "light"
+        if mode == "optimize":
+            optimizer_choice = st.radio(
+                "Optimizer",
+                pipeline.OPTIMIZERS,
+                format_func=lambda o: "BootstrapFewShot (solo demo few-shot, storico)"
+                if o == "bootstrap"
+                else "GEPA (riscrive anche le istruzioni, richiede più chiamate LLM)",
+                horizontal=True,
+                help=(
+                    "BootstrapFewShot è più economico e veloce: seleziona i migliori esempi "
+                    "few-shot ma non tocca le istruzioni scritte a mano. GEPA usa un LLM "
+                    "'di reflection' per riscrivere le istruzioni stesse leggendo il feedback "
+                    "della metrica — più lento e costoso in fase di ottimizzazione, ma può "
+                    "produrre prompt più corti e mirati (utile se il prompt Bootstrap attuale "
+                    "vi sembra gonfio di esempi)."
+                ),
+            )
+            if optimizer_choice == "gepa":
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    reflection_choice = st.selectbox(
+                        "LLM di reflection (proponente delle nuove istruzioni)",
+                        llm_configs.index.tolist(),
+                        index=llm_configs.index.tolist().index(default_idx),
+                        format_func=lambda i: f"{llm_configs.loc[i, 'provider']}/{llm_configs.loc[i, 'model']}",
+                        help=(
+                            "GEPA consiglia un modello 'forte' per la reflection (ragionamento "
+                            "lungo) — di default riusa lo stesso LLM della run, ma se avete "
+                            "configurato anche un modello più capace (es. un top-tier via "
+                            "OpenRouter) è consigliabile selezionarlo qui."
+                        ),
+                    )
+                    reflection_llm_row = llm_configs.loc[reflection_choice]
+                with col_b:
+                    gepa_budget = st.selectbox(
+                        "Budget ottimizzazione",
+                        ["light", "medium", "heavy"],
+                        help=(
+                            "Controlla quante valutazioni/chiamate LLM GEPA userà: 'light' è il "
+                            "più economico e un buon punto di partenza. Attenzione a eventuali "
+                            "timeout del reverse proxy (Traefik su Coolify) se scegliete "
+                            "'medium'/'heavy' su un client_max_body_size/timeout stretto — la "
+                            "run gira comunque in background nel processo Streamlit, ma la "
+                            "richiesta HTTP che l'ha avviata potrebbe scadere prima che finisca."
+                        ),
+                    )
+                if val_examples.empty:
+                    st.caption(
+                        "⚠️ Nessun esempio con split='val': GEPA userà gli esempi di training "
+                        "anche come validation set, il che rischia overfitting sugli esempi "
+                        "già visti. Aggiungete alcuni esempi con split 'val' nella tab "
+                        "'Esempi' per un segnale più affidabile."
+                    )
+
         kb_docs = db.list_kb_documents(client_id)
         business_context = pipeline.build_context(
             client_row["business_description"] or "",
@@ -284,9 +348,23 @@ with tab_run:
             api_key = get_api_key(llm_config_row["provider"])
             lm = pipeline.build_lm(llm_config_row["provider"], llm_config_row["model"], api_key)
 
-            run_id = db.create_run(client_id, mode, llm_config_row["id"], retrieval=retrieval)
+            reflection_lm = None
+            if optimizer_choice == "gepa" and reflection_llm_row is not None:
+                reflection_api_key = get_api_key(reflection_llm_row["provider"])
+                reflection_lm = pipeline.build_lm(
+                    reflection_llm_row["provider"], reflection_llm_row["model"], reflection_api_key
+                )
+
+            run_id = db.create_run(
+                client_id, mode, llm_config_row["id"], retrieval=retrieval, optimizer=optimizer_choice
+            )
             try:
-                with st.spinner(f"Eseguo run in modalità '{mode}'... può richiedere qualche minuto."):
+                spinner_msg = f"Eseguo run in modalità '{mode}'"
+                if mode == "optimize" and optimizer_choice == "gepa":
+                    spinner_msg += " con GEPA (può richiedere diversi minuti, riscrive le istruzioni)"
+                else:
+                    spinner_msg += "... può richiedere qualche minuto."
+                with st.spinner(spinner_msg):
                     if retrieval == "tools":
                         if mode == "draft":
                             result = pipeline.run_draft_with_tools(lm, client_id)
@@ -300,7 +378,22 @@ with tab_run:
                                 }
                                 for _, row in train_examples.iterrows()
                             ]
-                            result = pipeline.run_optimize_with_tools(lm, client_id, trainset)
+                            valset = [
+                                {
+                                    "question": row["question"],
+                                    "expected_answer": row["expected_answer"],
+                                }
+                                for _, row in val_examples.iterrows()
+                            ]
+                            result = pipeline.run_optimize_with_tools(
+                                lm,
+                                client_id,
+                                trainset,
+                                optimizer=optimizer_choice,
+                                valset=valset,
+                                reflection_lm=reflection_lm,
+                                auto=gepa_budget,
+                            )
                     elif mode == "draft":
                         result = pipeline.run_draft(lm, business_context)
                     else:
@@ -321,7 +414,24 @@ with tab_run:
                             }
                             for _, row in train_examples.iterrows()
                         ]
-                        result = pipeline.run_optimize(lm, trainset)
+                        valset = [
+                            {
+                                "context": row["context"]
+                                if isinstance(row["context"], str) and row["context"].strip()
+                                else business_context,
+                                "question": row["question"],
+                                "expected_answer": row["expected_answer"],
+                            }
+                            for _, row in val_examples.iterrows()
+                        ]
+                        result = pipeline.run_optimize(
+                            lm,
+                            trainset,
+                            optimizer=optimizer_choice,
+                            valset=valset,
+                            reflection_lm=reflection_lm,
+                            auto=gepa_budget,
+                        )
 
                     program_state = pipeline.save_program_to_dict(result["agent"])
                     db.finish_run(
@@ -344,7 +454,9 @@ with tab_history:
     if runs_df.empty:
         st.info("Nessuna run ancora eseguita per questo cliente.")
     else:
-        st.dataframe(runs_df[["created_at", "mode", "retrieval", "status"]], use_container_width=True)
+        st.dataframe(
+            runs_df[["created_at", "mode", "retrieval", "optimizer", "status"]], use_container_width=True
+        )
         run_ids = runs_df["id"].tolist()
         selected_run_id = st.selectbox(
             "Visualizza dettaglio run",
