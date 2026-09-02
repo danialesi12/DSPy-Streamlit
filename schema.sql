@@ -43,6 +43,7 @@ create table if not exists promptstudio.runs (
   id uuid primary key default gen_random_uuid(),
   client_id uuid not null references promptstudio.clients(id) on delete cascade,
   mode text not null,                  -- 'draft' | 'optimize'
+  retrieval text not null default 'full_context', -- 'full_context' | 'tools'
   llm_config_id uuid references promptstudio.llm_configs(id),
   status text not null default 'pending', -- pending | running | success | failed
   metrics jsonb,
@@ -52,6 +53,12 @@ create table if not exists promptstudio.runs (
   created_at timestamptz not null default now(),
   finished_at timestamptz
 );
+
+-- Migrazione per un database già esistente (schema creato prima di questa
+-- colonna): esegui questa ALTER da sola nel SQL Editor di Supabase, il
+-- blocco CREATE TABLE sopra con "if not exists" non la applica da solo a
+-- una tabella che esiste già.
+-- alter table promptstudio.runs add column if not exists retrieval text not null default 'full_context';
 
 create index if not exists idx_llm_configs_client on promptstudio.llm_configs(client_id);
 create index if not exists idx_kb_documents_client on promptstudio.kb_documents(client_id);
